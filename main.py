@@ -33,46 +33,42 @@ class CourseBot:
         if user_id not in self.user_preferences:
             self.user_preferences[user_id] = "720p"
         
-        welcome_text = f"""
-🤖 **Course Data Bot**
+        welcome_text = f"""🤖 Course Data Bot
 
-I can fetch course data from the API and send you a **formatted text file** containing:
+I can fetch course data from the API and send you a formatted text file containing:
 
-- Topics and classes
-- Video lecture links (your chosen quality)
-- PDF material links
-- Teacher information
+• Topics and classes
+• Video lecture links (your chosen quality)
+• PDF material links
+• Teacher information
 
-**Your current video quality preference:** `{self.user_preferences[user_id]}`
+Your current video quality preference: {self.user_preferences[user_id]}
 
-**Commands:**
+Commands:
 /start - Show this message  
 /help - Get help information  
 /quality - Change video quality preference  
-/get_course - Fetch course data from API and get a text file
-        """
-        await update.message.reply_text(welcome_text, parse_mode='Markdown')
+/get_course - Fetch course data from API and get a text file"""
+        await update.message.reply_text(welcome_text)
         
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        help_text = """
-📖 **Help Guide**
+        help_text = """📖 Help Guide
 
-**/get_course**  
-- Fetches data from the course API  
-- Generates a **.txt file** with:
-  - Course info
-  - Topics and classes
-  - Video links (your preferred quality)
-  - PDF links with names
+/get_course
+- Fetches data from the course API
+- Generates a .txt file with:
+  • Course info
+  • Topics and classes
+  • Video links (your preferred quality)
+  • PDF links with names
 
-**/quality**  
-- Change your preferred video quality  
-- Available options: 240p, 360p, 480p, 720p, 1080p  
+/quality
+- Change your preferred video quality
+- Available options: 240p, 360p, 480p, 720p, 1080p
 - The bot will prioritize your chosen quality
 
-The bot generates a structured text file with all the links.
-        """
-        await update.message.reply_text(help_text, parse_mode='Markdown')
+The bot generates a structured text file with all the links."""
+        await update.message.reply_text(help_text)
     
     async def quality_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [
@@ -90,9 +86,10 @@ The bot generates a structured text file with all the links.
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await update.message.reply_text(
-            "🎥 **Select your preferred video quality:**",
-            reply_markup=reply_markup,
-            parse_mode='Markdown'
+            "🎥 Select your preferred video quality:\n\n"
+            "This will determine which video links are shown first in the generated file. "
+            "If your chosen quality isn't available, other qualities will be shown.",
+            reply_markup=reply_markup
         )
     
     async def quality_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -105,14 +102,14 @@ The bot generates a structured text file with all the links.
         if quality == "all":
             self.user_preferences[user_id] = "all"
             await query.edit_message_text(
-                "✅ **Video quality preference set to: All Qualities**",
-                parse_mode='Markdown'
+                "✅ Video quality preference set to: All Qualities\n\n"
+                "All available video qualities will be shown in the generated file."
             )
         else:
             self.user_preferences[user_id] = quality
             await query.edit_message_text(
-                f"✅ **Video quality preference set to: {quality.upper()}**",
-                parse_mode='Markdown'
+                f"✅ Video quality preference set to: {quality.upper()}\n\n"
+                f"This quality will be prioritized in the generated file."
             )
     
     async def get_course_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -121,8 +118,7 @@ The bot generates a structured text file with all the links.
         
         await update.message.reply_text(
             f"📡 Fetching course data from API...\n"
-            f"🎥 Using quality preference: **{preferred_quality.upper()}**",
-            parse_mode='Markdown'
+            f"🎥 Using quality preference: {preferred_quality.upper()}"
         )
 
         try:
@@ -220,12 +216,12 @@ The bot generates a structured text file with all the links.
                     preferred_found = any(link["is_preferred"] for link in video_links)
                     
                     if preferred_quality != "all" and preferred_found:
-                        lines.append(f"  🎥 **Preferred Quality ({preferred_quality.upper()}):**")
+                        lines.append(f"  Preferred Quality ({preferred_quality.upper()}):")
                         for link in video_links:
                             if link["is_preferred"]:
                                 lines.append(f"    ✓ {link['url']} (Quality: {link['quality']})")
                         lines.append("")
-                        lines.append("  📹 Other Available Qualities:")
+                        lines.append("  Other Available Qualities:")
                         for link in video_links:
                             if not link["is_preferred"]:
                                 lines.append(f"    • {link['url']} (Quality: {link['quality']})")
