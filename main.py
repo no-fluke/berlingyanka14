@@ -2,7 +2,7 @@ import os
 import logging
 import requests
 from datetime import datetime
-from flask import Flask, request
+from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 
@@ -100,17 +100,25 @@ The bot generates a structured text file with all the links."""
         try:
             # Fetch all courses from API
             api_url = f"{self.api_base_url}/courses"
+            logger.info(f"Fetching batches from: {api_url}")
+            
             response = requests.get(api_url, timeout=30)
+            logger.info(f"API Response Status: {response.status_code}")
+            
             response.raise_for_status()
             
             data = response.json()
+            logger.info(f"API Response Data: {data}")
             
             if data.get('state') != 200:
-                await update.message.reply_text("❌ Failed to fetch batches from API.")
+                error_msg = data.get('msg', 'Unknown error')
+                logger.error(f"API returned error state: {error_msg}")
+                await update.message.reply_text(f"❌ API Error: {error_msg}")
                 return
             
             courses = data.get('data', [])
-            
+            logger.info(f"Found {len(courses)} courses")
+
             if not courses:
                 await update.message.reply_text("❌ No batches found in the API.")
                 return
@@ -121,19 +129,21 @@ The bot generates a structured text file with all the links."""
             # Create keyboard with batches
             keyboard = []
             for i, course in enumerate(courses, 1):
-                course_title = course.get('title', f'Batch {i}')
+                course_title = course.get('title', f'Batch {i}')[:64]  # Limit title length
                 keyboard.append([InlineKeyboardButton(f"{i}. {course_title}", callback_data=f"course_{i-1}")])
             
             reply_markup = InlineKeyboardMarkup(keyboard)
             
             await update.message.reply_text(
-                "📚 Available Batches:\n\n"
-                "Click on a batch to get its data:",
+                f"📚 Available Batches ({len(courses)} found):\n\nClick on a batch to get its data:",
                 reply_markup=reply_markup
             )
             
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Network error fetching batches: {e}")
+            await update.message.reply_text("❌ Network error fetching batches. Please try again later.")
         except Exception as e:
-            logger.error(f"Error fetching batches: {e}")
+            logger.error(f"Unexpected error fetching batches: {e}")
             await update.message.reply_text("❌ Error fetching batches. Please try again later.")
     
     async def course_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -141,25 +151,30 @@ The bot generates a structured text file with all the links."""
         query = update.callback_query
         await query.answer()
         
-        course_index = int(query.data.replace("course_", ""))
-        courses = context.user_data.get('available_courses', [])
-        
-        if not courses or course_index >= len(courses):
-            await query.edit_message_text("❌ Course not found. Please try /batches again.")
-            return
-        
-        selected_course = courses[course_index]
-        course_id = selected_course.get('id')
-        course_title = selected_course.get('title', 'Unknown Course')
-        
-        await query.edit_message_text(f"✅ Selected: {course_title}\n\nFetching course data...")
-        
-        # Store selected course ID in context for get_course_command
-        context.user_data['selected_course_id'] = course_id
-        context.user_data['selected_course_title'] = course_title
-        
-        # Automatically fetch course data
-        await self.fetch_course_data(update, context, course_id, course_title)
+        try:
+            course_index = int(query.data.replace("course_", ""))
+            courses = context.user_data.get('available_courses', [])
+            
+            if not courses or course_index >= len(courses):
+                await query.edit_message_text("❌ Course not found. Please try /batches again.")
+                return
+            
+            selected_course = courses[course_index]
+            course_id = selected_course.get('id')
+            course_title = selected_course.get('title', 'Unknown Course')
+            
+            await query.edit_message_text(f"✅ Selected: {course_title}\n\nFetching course data...")
+            
+            # Store selected course ID in context for get_course_command
+            context.user_data['selected_course_id'] = course_id
+            context.user_data['selected_course_title'] = course_title
+            
+            # Automatically fetch course data
+            await self.fetch_course_data(update, context, course_id, course_title)
+            
+        except Exception as e:
+            logger.error(f"Error in course callback: {e}")
+            await query.edit_message_text("❌ Error selecting course. Please try again.")
     
     async def get_course_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Fetch course data for the selected batch"""
@@ -191,22 +206,43 @@ The bot generates a structured text file with all the links."""
         
         try:
             api_url = f"{self.api_base_url}/courses/{course_id}/classes?populate=full"
+            logger.info(f"Fetching course data from: {api_url}")
+            
             response = requests.get(api_url, timeout=30)
+            logger.info(f"Course API Response Status: {response.status_code}")
+            
             response.raise_for_status()
             
             data = response.json()
+            logger.info(f"Course API Response Keys: {list(data.keys())}")
             
+            # Check if API returned success
             if data.get('state') != 200:
-                await update.message.reply_text("❌ Failed to fetch course data from API.")
+                error_msg = data.get('msg', 'Unknown error')
+                logger.error(f"Course API returned error: {error_msg}")
+                await update.message.reply_text(f"❌ API Error: {error_msg}")
                 return
             
-            course_info = data['data']['course']
-            classes_data = data['data']['classes']
+            # Check if data structure is as expected
+            if 'data' not in data:
+                logger.error(f"Unexpected data structure: {data}")
+                await update.message.reply_text("❌ Unexpected data format from API.")
+                return
+            
+            course_info = data['data'].get('course', {})
+            classes_data = data['data'].get('classes', [])
+            
+            logger.info(f"Found {len(classes_data)} topics in course")
+            
+            if not classes_data:
+                await update.message.reply_text("❌ No class data found for this course.")
+                return
             
             text_content = self.generate_course_text_file(course_info, classes_data, preferred_quality)
             
             filename = f"{course_title.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
             
+            # Send as text file
             await update.message.reply_document(
                 document=text_content.encode('utf-8'),
                 filename=filename,
@@ -219,8 +255,14 @@ The bot generates a structured text file with all the links."""
             
             await update.message.reply_text("✅ Course data file generated successfully!")
             
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Network error fetching course data: {e}")
+            await update.message.reply_text("❌ Network error fetching course data. Please try again later.")
+        except ValueError as e:
+            logger.error(f"JSON parsing error: {e}")
+            await update.message.reply_text("❌ Data format error from API. Please try again later.")
         except Exception as e:
-            logger.error(f"Error fetching course data: {e}")
+            logger.error(f"Unexpected error in fetch_course_data: {e}")
             await update.message.reply_text("❌ Error fetching course data. Please try again later.")
     
     async def quality_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
