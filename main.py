@@ -2,8 +2,23 @@ import os
 import logging
 import requests
 from datetime import datetime
+from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
+
+# Get port from environment variable (Render provides this)
+port = int(os.environ.get('PORT', 5000))
+
+# Initialize Flask app
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "🤖 Telegram Course Bot is running!"
+
+@app.route('/health')
+def health():
+    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
 
 # Configure logging
 logging.basicConfig(
@@ -18,14 +33,17 @@ class CourseBot:
         self.application = Application.builder().token(token).build()
         self.api_base_url = "https://backend.multistreaming.site/api"
         self.user_preferences = {}
+        self.available_courses = []
         self.setup_handlers()
         
     def setup_handlers(self):
         self.application.add_handler(CommandHandler("start", self.start_command))
         self.application.add_handler(CommandHandler("help", self.help_command))
+        self.application.add_handler(CommandHandler("batches", self.batches_command))
         self.application.add_handler(CommandHandler("get_course", self.get_course_command))
         self.application.add_handler(CommandHandler("quality", self.quality_command))
         self.application.add_handler(CallbackQueryHandler(self.quality_callback, pattern="^quality_"))
+        self.application.add_handler(CallbackQueryHandler(self.course_callback, pattern="^course_"))
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text))
         
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -35,7 +53,7 @@ class CourseBot:
         
         welcome_text = f"""🤖 Course Data Bot
 
-I can fetch course data from the API and send you a formatted text file containing:
+I can fetch course data from the API and send you formatted text files containing:
 
 • Topics and classes
 • Video lecture links (your chosen quality)
@@ -47,12 +65,17 @@ Your current video quality preference: {self.user_preferences[user_id]}
 Commands:
 /start - Show this message  
 /help - Get help information  
+/batches - Show all available batches
 /quality - Change video quality preference  
 /get_course - Fetch course data from API and get a text file"""
         await update.message.reply_text(welcome_text)
         
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         help_text = """📖 Help Guide
+
+/batches
+- Shows all available courses/batches
+- Select a batch to get its data
 
 /get_course
 - Fetches data from the course API
@@ -70,6 +93,136 @@ Commands:
 The bot generates a structured text file with all the links."""
         await update.message.reply_text(help_text)
     
+    async def batches_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show all available batches/courses"""
+        await update.message.reply_text("📚 Fetching available batches...")
+        
+        try:
+            # Fetch all courses from API
+            api_url = f"{self.api_base_url}/courses"
+            response = requests.get(api_url, timeout=30)
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            if data.get('state') != 200:
+                await update.message.reply_text("❌ Failed to fetch batches from API.")
+                return
+            
+            courses = data.get('data', [])
+            
+            if not courses:
+                await update.message.reply_text("❌ No batches found in the API.")
+                return
+            
+            self.available_courses = courses
+            context.user_data['available_courses'] = courses
+            
+            # Create keyboard with batches
+            keyboard = []
+            for i, course in enumerate(courses, 1):
+                course_title = course.get('title', f'Batch {i}')
+                keyboard.append([InlineKeyboardButton(f"{i}. {course_title}", callback_data=f"course_{i-1}")])
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_text(
+                "📚 Available Batches:\n\n"
+                "Click on a batch to get its data:",
+                reply_markup=reply_markup
+            )
+            
+        except Exception as e:
+            logger.error(f"Error fetching batches: {e}")
+            await update.message.reply_text("❌ Error fetching batches. Please try again later.")
+    
+    async def course_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle course selection"""
+        query = update.callback_query
+        await query.answer()
+        
+        course_index = int(query.data.replace("course_", ""))
+        courses = context.user_data.get('available_courses', [])
+        
+        if not courses or course_index >= len(courses):
+            await query.edit_message_text("❌ Course not found. Please try /batches again.")
+            return
+        
+        selected_course = courses[course_index]
+        course_id = selected_course.get('id')
+        course_title = selected_course.get('title', 'Unknown Course')
+        
+        await query.edit_message_text(f"✅ Selected: {course_title}\n\nFetching course data...")
+        
+        # Store selected course ID in context for get_course_command
+        context.user_data['selected_course_id'] = course_id
+        context.user_data['selected_course_title'] = course_title
+        
+        # Automatically fetch course data
+        await self.fetch_course_data(update, context, course_id, course_title)
+    
+    async def get_course_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Fetch course data for the selected batch"""
+        user_id = update.effective_user.id
+        preferred_quality = self.user_preferences.get(user_id, "720p")
+        
+        # Check if we have a selected course
+        course_id = context.user_data.get('selected_course_id')
+        course_title = context.user_data.get('selected_course_title', 'Unknown Course')
+        
+        if not course_id:
+            await update.message.reply_text(
+                "❌ No course selected. Please use /batches to select a batch first."
+            )
+            return
+        
+        await update.message.reply_text(
+            f"📡 Fetching data for: {course_title}\n"
+            f"🎥 Using quality preference: {preferred_quality.upper()}"
+        )
+        
+        await self.fetch_course_data(update, context, course_id, course_title, preferred_quality)
+    
+    async def fetch_course_data(self, update: Update, context: ContextTypes.DEFAULT_TYPE, course_id: str, course_title: str, preferred_quality: str = None):
+        """Fetch and process course data"""
+        if preferred_quality is None:
+            user_id = update.effective_user.id
+            preferred_quality = self.user_preferences.get(user_id, "720p")
+        
+        try:
+            api_url = f"{self.api_base_url}/courses/{course_id}/classes?populate=full"
+            response = requests.get(api_url, timeout=30)
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            if data.get('state') != 200:
+                await update.message.reply_text("❌ Failed to fetch course data from API.")
+                return
+            
+            course_info = data['data']['course']
+            classes_data = data['data']['classes']
+            
+            text_content = self.generate_course_text_file(course_info, classes_data, preferred_quality)
+            
+            filename = f"{course_title.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+            
+            await update.message.reply_document(
+                document=text_content.encode('utf-8'),
+                filename=filename,
+                caption=(
+                    f"📚 Course Data: {course_title}\n"
+                    f"🎥 Quality Preference: {preferred_quality.upper()}\n"
+                    f"📅 Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                )
+            )
+            
+            await update.message.reply_text("✅ Course data file generated successfully!")
+            
+        except Exception as e:
+            logger.error(f"Error fetching course data: {e}")
+            await update.message.reply_text("❌ Error fetching course data. Please try again later.")
+    
     async def quality_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [
             [
@@ -86,9 +239,7 @@ The bot generates a structured text file with all the links."""
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await update.message.reply_text(
-            "🎥 Select your preferred video quality:\n\n"
-            "This will determine which video links are shown first in the generated file. "
-            "If your chosen quality isn't available, other qualities will be shown.",
+            "🎥 Select your preferred video quality:",
             reply_markup=reply_markup
         )
     
@@ -102,60 +253,13 @@ The bot generates a structured text file with all the links."""
         if quality == "all":
             self.user_preferences[user_id] = "all"
             await query.edit_message_text(
-                "✅ Video quality preference set to: All Qualities\n\n"
-                "All available video qualities will be shown in the generated file."
+                "✅ Video quality preference set to: All Qualities"
             )
         else:
             self.user_preferences[user_id] = quality
             await query.edit_message_text(
-                f"✅ Video quality preference set to: {quality.upper()}\n\n"
-                f"This quality will be prioritized in the generated file."
+                f"✅ Video quality preference set to: {quality.upper()}"
             )
-    
-    async def get_course_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-        preferred_quality = self.user_preferences.get(user_id, "720p")
-        
-        await update.message.reply_text(
-            f"📡 Fetching course data from API...\n"
-            f"🎥 Using quality preference: {preferred_quality.upper()}"
-        )
-
-        try:
-            course_id = "68e7b6e6aaf4383d1192dfb6"
-            api_url = f"{self.api_base_url}/courses/{course_id}/classes?populate=full"
-            
-            response = requests.get(api_url, timeout=30)
-            response.raise_for_status()
-            
-            data = response.json()
-            
-            if data.get('state') != 200:
-                await update.message.reply_text("❌ Failed to fetch course data from API.")
-                return
-            
-            course_info = data['data']['course']
-            classes_data = data['data']['classes']
-            
-            text_content = self.generate_course_text_file(course_info, classes_data, preferred_quality)
-            
-            filename = f"course_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
-            
-            await update.message.reply_document(
-                document=text_content.encode('utf-8'),
-                filename=filename,
-                caption=(
-                    f"📚 Course Data: {course_info.get('title', 'Unknown Course')}\n"
-                    f"🎥 Quality Preference: {preferred_quality.upper()}\n"
-                    f"📅 Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                )
-            )
-            
-            await update.message.reply_text("✅ Course data file generated successfully!")
-            
-        except Exception as e:
-            logger.error(f"Error fetching course data: {e}")
-            await update.message.reply_text("❌ Error fetching course data. Please try again later.")
     
     def get_video_links_by_preference(self, class_data, preferred_quality):
         video_links = []
@@ -258,12 +362,15 @@ The bot generates a structured text file with all the links."""
             f"👋 Available commands:\n\n"
             f"/start - Show welcome message\n"
             f"/help - Help & usage\n"
+            f"/batches - Show all available batches\n"
             f"/quality - Change video quality (Current: {current_quality.upper()})\n"
-            f"/get_course - Fetch course data from the API"
+            f"/get_course - Fetch data for selected batch"
         )
 
+def run_flask():
+    app.run(host='0.0.0.0', port=port)
+
 def main():
-    # Try multiple environment variable names
     token = os.getenv('TELEGRAM_BOT_TOKEN') or os.getenv('BOT_TOKEN')
     
     if not token:
@@ -274,9 +381,18 @@ def main():
     logger.info("✅ Bot token found, starting bot...")
     
     try:
+        # Start Flask in a separate thread
+        import threading
+        flask_thread = threading.Thread(target=run_flask, daemon=True)
+        flask_thread.start()
+        
+        logger.info(f"🌐 Flask server started on port {port}")
+        
+        # Start the bot
         bot = CourseBot(token)
         logger.info("🤖 Bot is starting...")
         bot.application.run_polling(allowed_updates=Update.ALL_TYPES)
+        
     except Exception as e:
         logger.error(f"❌ Failed to start bot: {e}")
 
