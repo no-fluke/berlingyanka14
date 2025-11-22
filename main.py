@@ -163,14 +163,13 @@ The bot generates a structured text file with all the links."""
             course_id = selected_course.get('id')
             course_title = selected_course.get('title', 'Unknown Course')
             
-            await query.edit_message_text(f"✅ Selected: {course_title}\n\nFetching course data...")
-            
             # Store selected course ID in context for get_course_command
             context.user_data['selected_course_id'] = course_id
             context.user_data['selected_course_title'] = course_title
             
-            # Automatically fetch course data
-            await self.fetch_course_data(update, context, course_id, course_title)
+            # Automatically fetch course data and send as file
+            await query.edit_message_text(f"✅ Selected: {course_title}\n\nFetching course data...")
+            await self.fetch_and_send_course_data(update, context, course_id, course_title)
             
         except Exception as e:
             logger.error(f"Error in course callback: {e}")
@@ -196,10 +195,10 @@ The bot generates a structured text file with all the links."""
             f"🎥 Using quality preference: {preferred_quality.upper()}"
         )
         
-        await self.fetch_course_data(update, context, course_id, course_title, preferred_quality)
+        await self.fetch_and_send_course_data(update, context, course_id, course_title, preferred_quality)
     
-    async def fetch_course_data(self, update: Update, context: ContextTypes.DEFAULT_TYPE, course_id: str, course_title: str, preferred_quality: str = None):
-        """Fetch and process course data"""
+    async def fetch_and_send_course_data(self, update: Update, context: ContextTypes.DEFAULT_TYPE, course_id: str, course_title: str, preferred_quality: str = None):
+        """Fetch and process course data and send as file"""
         if preferred_quality is None:
             user_id = update.effective_user.id
             preferred_quality = self.user_preferences.get(user_id, "720p")
@@ -220,13 +219,13 @@ The bot generates a structured text file with all the links."""
             if data.get('state') != 200:
                 error_msg = data.get('msg', 'Unknown error')
                 logger.error(f"Course API returned error: {error_msg}")
-                await update.message.reply_text(f"❌ API Error: {error_msg}")
+                await update.effective_message.reply_text(f"❌ API Error: {error_msg}")
                 return
             
             # Check if data structure is as expected
             if 'data' not in data:
                 logger.error(f"Unexpected data structure: {data}")
-                await update.message.reply_text("❌ Unexpected data format from API.")
+                await update.effective_message.reply_text("❌ Unexpected data format from API.")
                 return
             
             course_info = data['data'].get('course', {})
@@ -235,15 +234,15 @@ The bot generates a structured text file with all the links."""
             logger.info(f"Found {len(classes_data)} topics in course")
             
             if not classes_data:
-                await update.message.reply_text("❌ No class data found for this course.")
+                await update.effective_message.reply_text("❌ No class data found for this course.")
                 return
             
-            text_content = self.generate_course_text_file(course_info, classes_data, preferred_quality)
+            text_content = self.generate_formatted_text_file(course_info, classes_data, preferred_quality)
             
             filename = f"{course_title.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
             
             # Send as text file
-            await update.message.reply_document(
+            await update.effective_message.reply_document(
                 document=text_content.encode('utf-8'),
                 filename=filename,
                 caption=(
@@ -253,17 +252,97 @@ The bot generates a structured text file with all the links."""
                 )
             )
             
-            await update.message.reply_text("✅ Course data file generated successfully!")
-            
         except requests.exceptions.RequestException as e:
             logger.error(f"Network error fetching course data: {e}")
-            await update.message.reply_text("❌ Network error fetching course data. Please try again later.")
+            await update.effective_message.reply_text("❌ Network error fetching course data. Please try again later.")
         except ValueError as e:
             logger.error(f"JSON parsing error: {e}")
-            await update.message.reply_text("❌ Data format error from API. Please try again later.")
+            await update.effective_message.reply_text("❌ Data format error from API. Please try again later.")
         except Exception as e:
             logger.error(f"Unexpected error in fetch_course_data: {e}")
-            await update.message.reply_text("❌ Error fetching course data. Please try again later.")
+            await update.effective_message.reply_text("❌ Error fetching course data. Please try again later.")
+    
+    def get_preferred_video_url(self, class_data, preferred_quality):
+        """Get only the preferred quality video URL"""
+        mp4_recordings = class_data.get('mp4Recordings', [])
+        
+        # If no recordings, try class_link
+        if not mp4_recordings:
+            class_link = class_data.get('class_link')
+            if class_link and class_link.startswith(('http://', 'https://')):
+                return class_link
+            return None
+        
+        # Look for exact quality match first
+        for recording in mp4_recordings:
+            quality = recording.get('quality', '').lower()
+            if quality == preferred_quality.lower():
+                return recording.get('url')
+        
+        # If exact match not found, look for closest quality
+        quality_priority = ['1080p', '720p', '480p', '360p', '240p']
+        if preferred_quality.lower() in quality_priority:
+            pref_index = quality_priority.index(preferred_quality.lower())
+            for i in range(pref_index, len(quality_priority)):
+                for recording in mp4_recordings:
+                    if recording.get('quality', '').lower() == quality_priority[i]:
+                        return recording.get('url')
+        
+        # If still not found, return the first available recording
+        if mp4_recordings:
+            return mp4_recordings[0].get('url')
+        
+        # Fallback to class_link
+        class_link = class_data.get('class_link')
+        if class_link and class_link.startswith(('http://', 'https://')):
+            return class_link
+        
+        return None
+    
+    def generate_formatted_text_file(self, course_info, classes_data, preferred_quality):
+        """Generate text file in the exact format you provided"""
+        lines = []
+        
+        # Process video classes
+        video_classes = []
+        pdf_materials = []
+        
+        for topic_index, topic in enumerate(classes_data, 1):
+            topic_name = topic.get('topicName', f'Topic {topic_index}')
+            topic_classes = topic.get('classes', [])
+            
+            for class_data in topic_classes:
+                class_title = class_data.get('title', '')
+                teacher_name = class_data.get('teacherName', 'Unknown Teacher')
+                subject = topic_name  # Using topic name as subject
+                
+                # Get video URL with preferred quality only
+                video_url = self.get_preferred_video_url(class_data, preferred_quality)
+                
+                if video_url:
+                    # Format: Class-01 || English Basics | Aman Sir | English | (AMAN SIR): https://...
+                    class_number = class_title.split()[-1] if class_title and class_title.split()[-1].isdigit() else "01"
+                    formatted_line = f"Class-{class_number} || {class_title} | {teacher_name} | {subject} | ({teacher_name.upper()}): {video_url}"
+                    video_classes.append(formatted_line)
+                
+                # Collect PDF materials
+                class_pdfs = class_data.get('classPdf', [])
+                for pdf in class_pdfs:
+                    pdf_url = pdf.get('url')
+                    pdf_name = pdf.get('name', 'Unknown PDF')
+                    if pdf_url and pdf_url.startswith(('http://', 'https://')):
+                        # Format: English Basics Lec-1 without anno (AMAN SIR): https://...
+                        pdf_line = f"{pdf_name} ({teacher_name.upper()}): {pdf_url}"
+                        pdf_materials.append(pdf_line)
+        
+        # Add video classes to lines
+        lines.extend(video_classes)
+        lines.append("")  # Empty line between sections
+        
+        # Add PDF materials to lines
+        lines.extend(pdf_materials)
+        
+        return '\n'.join(lines)
     
     async def quality_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [
@@ -275,7 +354,6 @@ The bot generates a structured text file with all the links."""
             [
                 InlineKeyboardButton("720p", callback_data="quality_720p"),
                 InlineKeyboardButton("1080p", callback_data="quality_1080p"),
-                InlineKeyboardButton("All Qualities", callback_data="quality_all"),
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -292,109 +370,10 @@ The bot generates a structured text file with all the links."""
         user_id = query.from_user.id
         quality = query.data.replace("quality_", "")
         
-        if quality == "all":
-            self.user_preferences[user_id] = "all"
-            await query.edit_message_text(
-                "✅ Video quality preference set to: All Qualities"
-            )
-        else:
-            self.user_preferences[user_id] = quality
-            await query.edit_message_text(
-                f"✅ Video quality preference set to: {quality.upper()}"
-            )
-    
-    def get_video_links_by_preference(self, class_data, preferred_quality):
-        video_links = []
-        
-        class_link = class_data.get('class_link')
-        if class_link and class_link.startswith(('http://', 'https://')):
-            video_links.append({"url": class_link, "quality": "Main Link", "is_preferred": False})
-        
-        mp4_recordings = class_data.get('mp4Recordings', [])
-        for recording in mp4_recordings:
-            video_url = recording.get('url')
-            quality = recording.get('quality', 'Unknown')
-            if video_url and video_url.startswith(('http://', 'https://')):
-                is_preferred = (preferred_quality != "all" and quality.lower() == preferred_quality.lower())
-                video_links.append({
-                    "url": video_url, 
-                    "quality": quality, 
-                    "is_preferred": is_preferred
-                })
-        
-        if preferred_quality != "all":
-            video_links.sort(key=lambda x: (not x["is_preferred"], x["quality"]))
-        
-        return video_links
-    
-    def generate_course_text_file(self, course_info, classes_data, preferred_quality):
-        lines = []
-        
-        lines.append(f"Course Data Extracted on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        lines.append(f"Source: {course_info.get('title', 'Unknown Course')}")
-        lines.append(f"Video Quality Preference: {preferred_quality.upper()}")
-        lines.append("=" * 50)
-        lines.append("")
-        
-        for topic_index, topic in enumerate(classes_data, 1):
-            topic_name = topic.get('topicName', f'Topic {topic_index}')
-            topic_classes = topic.get('classes', [])
-            
-            lines.append(f"TOPIC: {topic_name}")
-            lines.append("-" * 30)
-            lines.append("")
-            
-            for class_index, class_data in enumerate(topic_classes, 1):
-                class_title = class_data.get('title', f'Class {class_index}')
-                class_description = class_data.get('description', '')
-                teacher_name = class_data.get('teacherName', 'Unknown Teacher')
-                
-                lines.append(f"Class {class_index}: {class_title}")
-                if class_description:
-                    lines.append(f"Description: {class_description}")
-                lines.append(f"Teacher: {teacher_name}")
-                lines.append("")
-                
-                video_links = self.get_video_links_by_preference(class_data, preferred_quality)
-                
-                if video_links:
-                    lines.append("Video Lectures:")
-                    preferred_found = any(link["is_preferred"] for link in video_links)
-                    
-                    if preferred_quality != "all" and preferred_found:
-                        lines.append(f"  Preferred Quality ({preferred_quality.upper()}):")
-                        for link in video_links:
-                            if link["is_preferred"]:
-                                lines.append(f"    ✓ {link['url']} (Quality: {link['quality']})")
-                        lines.append("")
-                        lines.append("  Other Available Qualities:")
-                        for link in video_links:
-                            if not link["is_preferred"]:
-                                lines.append(f"    • {link['url']} (Quality: {link['quality']})")
-                    else:
-                        for i, link in enumerate(video_links, 1):
-                            prefix = "✓" if link["is_preferred"] else "•"
-                            lines.append(f"  {prefix} {link['url']} (Quality: {link['quality']})")
-                    lines.append("")
-                
-                pdf_links = []
-                class_pdfs = class_data.get('classPdf', [])
-                for pdf in class_pdfs:
-                    pdf_url = pdf.get('url')
-                    pdf_name = pdf.get('name', 'Unknown PDF')
-                    if pdf_url and pdf_url.startswith(('http://', 'https://')):
-                        pdf_links.append(f"{pdf_url} (Name: {pdf_name})")
-                
-                if pdf_links:
-                    lines.append("PDF Materials:")
-                    for i, pdf_link in enumerate(pdf_links, 1):
-                        lines.append(f"  {i}. {pdf_link}")
-                    lines.append("")
-                
-                lines.append("=" * 50)
-                lines.append("")
-        
-        return '\n'.join(lines)
+        self.user_preferences[user_id] = quality
+        await query.edit_message_text(
+            f"✅ Video quality preference set to: {quality.upper()}"
+        )
     
     async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
