@@ -239,6 +239,7 @@ The bot generates a structured text file with all the links."""
             
             text_content = self.generate_formatted_text_file(course_info, classes_data, preferred_quality)
             
+            # Remove numbering/timestamp from filename - just use course title
             filename = f"{course_title.replace(' ', '_')}.txt"
             
             # Send as text file
@@ -300,87 +301,81 @@ The bot generates a structured text file with all the links."""
         return None
     
     def generate_formatted_text_file(self, course_info, classes_data, preferred_quality):
-        """Generate text file in the exact format you provided with PDFs below respective videos"""
+        """Generate text file with proper arrangement of videos and PDFs by topic"""
+        import re
         lines = []
         
-        # Process all classes and organize by class number
-        class_entries = {}
-        pdf_entries = []
+        # First, collect all video classes and their PDFs
+        all_classes = []
         
-        for topic_index, topic in enumerate(classes_data, 1):
-            topic_name = topic.get('topicName', f'Topic {topic_index}')
+        for topic in classes_data:
+            topic_name = topic.get('topicName', 'Unknown Topic')
             topic_classes = topic.get('classes', [])
             
             for class_data in topic_classes:
                 class_title = class_data.get('title', '')
                 teacher_name = class_data.get('teacherName', 'Unknown Teacher')
-                subject = topic_name
                 
-                # Extract class number from title or use default
+                # Extract class number from title
                 class_number = "01"
                 if class_title:
-                    # Try to extract number from title (e.g., "Class 01" or "Class-01")
-                    import re
                     match = re.search(r'(\d+)', class_title)
                     if match:
                         class_number = match.group(1).zfill(2)
                 
-                # Get video URL with preferred quality only
+                # Get video URL
                 video_url = self.get_preferred_video_url(class_data, preferred_quality)
                 
+                # Get PDFs for this class
+                pdfs = []
+                class_pdfs = class_data.get('classPdf', [])
+                for pdf in class_pdfs:
+                    pdf_url = pdf.get('url')
+                    pdf_name = pdf.get('name', 'Unknown PDF')
+                    if pdf_url and pdf_url.startswith(('http://', 'https://')):
+                        pdfs.append({
+                            'name': pdf_name,
+                            'url': pdf_url,
+                            'teacher': teacher_name
+                        })
+                
                 if video_url:
-                    # Format: Class-01 || English Basics | Aman Sir | English | (AMAN SIR): https://...
-                    formatted_line = f"Class-{class_number} || {class_title} | {teacher_name} | {subject} | ({teacher_name.upper()}): {video_url}"
-                    
-                    # Store class entry
-                    class_entries[class_number] = formatted_line
-                    
-                    # Get PDFs for this specific class and store them with the class number
-                    class_pdfs = class_data.get('classPdf', [])
-                    for pdf in class_pdfs:
-                        pdf_url = pdf.get('url')
-                        pdf_name = pdf.get('name', 'Unknown PDF')
-                        if pdf_url and pdf_url.startswith(('http://', 'https://')):
-                            pdf_line = f"{pdf_name} ({teacher_name.upper()}): {pdf_url}"
-                            # Store PDF with reference to its class
-                            if class_number not in class_entries:
-                                class_entries[class_number] = None
-                            # We'll associate PDFs with classes when building the final output
+                    all_classes.append({
+                        'class_number': class_number,
+                        'class_title': class_title,
+                        'teacher_name': teacher_name,
+                        'topic_name': topic_name,
+                        'video_url': video_url,
+                        'pdfs': pdfs
+                    })
         
-        # Now build the final output with videos and their respective PDFs
-        final_lines = []
+        # Sort classes by topic and then by class number
+        all_classes.sort(key=lambda x: (x['topic_name'], x['class_number']))
         
-        # Sort classes by number
-        sorted_classes = sorted(class_entries.keys())
+        # Group by topic
+        current_topic = None
         
-        for class_num in sorted_classes:
-            class_line = class_entries[class_num]
-            if class_line:
-                final_lines.append(class_line)
-                
-                # Add PDFs that belong to this class
-                # Find PDFs for this class by matching class number in PDF name
-                for topic in classes_data:
-                    for class_data in topic.get('classes', []):
-                        class_title = class_data.get('title', '')
-                        teacher_name = class_data.get('teacherName', 'Unknown Teacher')
-                        
-                        # Check if this class matches our current class number
-                        current_class_num_match = re.search(r'(\d+)', class_title) if class_title else None
-                        current_class_num = current_class_num_match.group(1).zfill(2) if current_class_num_match else None
-                        
-                        if current_class_num == class_num:
-                            class_pdfs = class_data.get('classPdf', [])
-                            for pdf in class_pdfs:
-                                pdf_url = pdf.get('url')
-                                pdf_name = pdf.get('name', 'Unknown PDF')
-                                if pdf_url and pdf_url.startswith(('http://', 'https://')):
-                                    pdf_line = f"{pdf_name} ({teacher_name.upper()}): {pdf_url}"
-                                    final_lines.append(pdf_line)
-                
-                final_lines.append("")  # Empty line between classes
+        for class_info in all_classes:
+            # Add topic header if it's a new topic
+            if class_info['topic_name'] != current_topic:
+                if current_topic is not None:
+                    lines.append("")  # Empty line between topics
+                current_topic = class_info['topic_name']
+                # You can uncomment the next line if you want topic headers
+                # lines.append(f"=== {current_topic.upper()} ===")
+            
+            # Add video line
+            video_line = f"Class-{class_info['class_number']} || {class_info['class_title']} | {class_info['teacher_name']} | {class_info['topic_name']} | ({class_info['teacher_name'].upper()}): {class_info['video_url']}"
+            lines.append(video_line)
+            
+            # Add PDFs for this class
+            for pdf in class_info['pdfs']:
+                pdf_line = f"{pdf['name']} ({pdf['teacher'].upper()}): {pdf['url']}"
+                lines.append(pdf_line)
+            
+            lines.append("")  # Empty line between classes
         
-        return '\n'.join(final_lines)
+        return '\n'.join(lines)
     
     async def quality_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [
