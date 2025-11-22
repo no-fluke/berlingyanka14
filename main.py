@@ -239,7 +239,7 @@ The bot generates a structured text file with all the links."""
             
             text_content = self.generate_formatted_text_file(course_info, classes_data, preferred_quality)
             
-            filename = f"{course_title.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+            filename = f"{course_title.replace(' ', '_')}.txt"
             
             # Send as text file
             await update.effective_message.reply_document(
